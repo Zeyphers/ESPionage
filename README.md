@@ -1,8 +1,15 @@
-# ESPionage
+<p align="center">
+  <img src="logo.png" alt="ESPionage" width="400"/>
+</p>
 
-A self-contained WiFi & Bluetooth pen-test toolkit for the ESP32-S3. No laptop required — the device hosts its own WiFi access point and a full-featured web UI accessible from any phone or browser.
+<p align="center">
+  A self-contained WiFi &amp; Bluetooth pen-test toolkit for the ESP32-S3.<br/>
+  No laptop required — hosts its own WiFi AP and full-featured web UI accessible from any phone or browser.
+</p>
 
-> **For authorized security research and educational use only.**
+<p align="center">
+  <strong>For authorized security research and educational use only.</strong>
+</p>
 
 ---
 

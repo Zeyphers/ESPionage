@@ -84,66 +84,86 @@ A self-contained WiFi & Bluetooth pen-test toolkit for the ESP32-S3. No laptop r
 
 ## Installation
 
-### Prerequisites
+### Step 1 — Install Arduino IDE
 
-- **Arduino IDE 2.x** or **arduino-cli**
-- **ESP32 Arduino Core 3.x** — add the board manager URL:
-  ```
-  https://espressif.github.io/arduino-esp32/package_esp32_index.json
-  ```
-- **Required libraries** (install via Library Manager or manually):
-  | Library | Author |
-  |---|---|
-  | `NimBLE-Arduino` | h2zero |
-  | `ESPAsyncWebServer` | lacamera / dvarrel |
-  | `AsyncTCP` | dvarrel |
-  | `ArduinoJson` | Benoit Blanchon |
+Download and install **[Arduino IDE 2](https://www.arduino.cc/en/software)** if you don't have it already.
 
 ---
 
-### Arduino IDE
+### Step 2 — Add the ESP32 board package
 
-1. Clone or download this repository
-2. Open `esp32_puck/esp32_puck.ino` in Arduino IDE
-3. Select your board and configure:
-
-   | Setting | Value |
-   |---|---|
-   | Board | `ESP32S3 Dev Module` |
-   | USB Mode | `USB-OTG (TinyUSB)` |
-   | Flash Size | `16MB` (or match your board) |
-   | Partition Scheme | `16MB Flash (3MB APP / 9.9MB FATFS)` |
-   | PSRAM | `OPI PSRAM` |
-   | CPU Frequency | `240MHz` |
-
-4. Click **Upload**
+1. Open Arduino IDE → **File → Preferences**
+2. Paste this URL into the **"Additional boards manager URLs"** box:
+   ```
+   https://espressif.github.io/arduino-esp32/package_esp32_index.json
+   ```
+3. Go to **Tools → Board → Boards Manager**, search for `esp32`, and install **esp32 by Espressif Systems** (version 3.x)
 
 ---
 
-### arduino-cli (one-liner)
+### Step 3 — Install the required libraries
 
-```bash
-arduino-cli compile --fqbn esp32:esp32:esp32s3:USBMode=default,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,CPUFreq=240,PSRAM=opi esp32_puck && \
-arduino-cli upload  --fqbn esp32:esp32:esp32s3:USBMode=default,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,CPUFreq=240,PSRAM=opi \
-  -p /dev/cu.usbmodem* esp32_puck
-```
+Go to **Tools → Manage Libraries** and install each of these:
 
----
-
-### First Boot
-
-1. Power the ESP32 — it will create a WiFi access point
-2. Connect to **`ESPionage`** (default password: `espionage123`)
-3. Open **`http://192.168.4.1`** in any browser
-4. The full UI loads — no app install required
-
-> You can change the AP name and password from the **System** tab. Changes persist across reboots.
+| Library | Search for |
+|---|---|
+| NimBLE-Arduino | `NimBLE-Arduino` by h2zero |
+| ESPAsyncWebServer | `ESPAsyncWebServer` by lacamera |
+| AsyncTCP | `AsyncTCP` by dvarrel |
+| ArduinoJson | `ArduinoJson` by Benoit Blanchon |
 
 ---
 
-### Entering Download Mode (if the device isn't showing up as a serial port)
+### Step 4 — Open the sketch
 
-Hold **BOOT**, plug in the USB cable, then release **BOOT**. The device will enumerate as a serial port for flashing.
+Download or clone this repo, then open **`esp32_puck/esp32_puck.ino`** in Arduino IDE.
+
+---
+
+### Step 5 — Configure the board settings
+
+Go to **Tools** and set the following:
+
+| Setting | Value |
+|---|---|
+| Board | `ESP32S3 Dev Module` |
+| USB Mode | `USB-OTG (TinyUSB)` |
+| Flash Size | `16MB` *(adjust if your board has less)* |
+| Partition Scheme | `16MB Flash (3MB APP/9.9MB FATFS)` |
+| PSRAM | `OPI PSRAM` |
+| CPU Frequency | `240MHz` |
+| Upload Speed | `921600` |
+
+> If you don't see these options make sure **ESP32S3 Dev Module** is selected under **Tools → Board → esp32**.
+
+---
+
+### Step 6 — Flash it
+
+Plug in your ESP32-S3 via USB and click **Upload** (the → arrow button).
+
+> **Device not showing up as a port?** Hold the **BOOT** button on the board, plug in the USB cable, then release BOOT. It should appear as a serial port.
+
+---
+
+### Step 7 — Connect and use
+
+1. Once flashed, the ESP32 will boot and create a WiFi hotspot
+2. On your phone or laptop, connect to **`ESPionage`** (password: `espionage123`)
+3. Open a browser and go to **`http://192.168.4.1`**
+4. The full UI loads — no app install needed
+
+> You can change the AP name and password under the **System** tab. Settings are saved across reboots.
+
+---
+
+### GPS Support (iPhone / iPad)
+
+The wardriving and GPS features work by having your phone push its location to the device. An **iOS Shortcut** is available that does this automatically while you drive:
+
+**[📍 Download the ESPionage GPS Shortcut](https://www.icloud.com/shortcuts/d88a14e45a92426c98f01b5011200728)**
+
+Once installed, run the shortcut while connected to the ESPionage hotspot. It will continuously send your phone's GPS coordinates to the device for tagging wardrive logs.
 
 ---
 

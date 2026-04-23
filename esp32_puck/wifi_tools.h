@@ -60,6 +60,26 @@ namespace WifiTools {
   void randomizeMac();            // pick a new random STA MAC
   int  currentTxPower();
 
+  // PMKID / WPA handshake capture
+  void startHandshake(const JsonDocument& params); // {bssid, channel, ssid}
+  void stopHandshake();
+  void tickHandshake();
+  String handshakeJson();
+  String handshakeHc22000();  // hashcat 22000 export
+  void fillHandshakeStatus(JsonDocument& doc);
+
+  // Station scanner — find clients associated with a target AP
+  void startStationScan(const JsonDocument& params); // {bssid, channel}
+  void stopStationScan();
+  String stationScanJson();
+  void fillStationStatus(JsonDocument& doc);
+
+  // Karma attack — auto-beacon every SSID seen in probe requests
+  void startKarma();
+  void stopKarma();
+  void tickKarma();
+  void fillKarmaStatus(JsonDocument& doc);
+
   // Clear all captured logs
   void clearLogs();
 

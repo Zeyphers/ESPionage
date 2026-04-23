@@ -207,6 +207,8 @@ static void buildSamsungPayload(uint8_t *out, size_t &outLen) {
 // Gap between bursts (ms) — WiFi recovery window.
 #define BLE_SCAN_PAUSE_MS  2000
 
+static void checkForSkimmer(const NimBLEAdvertisedDevice* dev);
+
 class ScanCallbacks : public NimBLEScanCallbacks {
   void onResult(const NimBLEAdvertisedDevice *dev) override {
     String mac = String(dev->getAddress().toString().c_str());
@@ -244,6 +246,8 @@ class ScanCallbacks : public NimBLEScanCallbacks {
         }
       }
     }
+
+    checkForSkimmer(dev);
 
     // Mutex-protected write to scanResults
     if (scanMutex && xSemaphoreTake(scanMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
@@ -781,6 +785,225 @@ void fillAirtagEmulationStatus(JsonDocument& doc) {
   doc["active"] = atEmuActive;
   doc["count"]  = atEmuCount;
   doc["name"]   = atEmuName;
+}
+
+// ---------------------------------------------------------------- BLE skimmer detection
+// Known skimmer name patterns and OUI prefixes used by cheap BT modules
+// found in gas-pump / ATM skimmers (HC-05/06, generic SPP modules, etc.)
+static const char* SKIMMER_NAMES[] = {
+  "HC-05", "HC-06", "HC-08", "HC-10", "HC-12",
+  "MP-06", "BT-06", "SCAT", "Skimmer",
+  "MLT-BT05", "BT05", "AT-09", "HM-10",
+  nullptr
+};
+// OUI prefixes (first 3 bytes) of modules commonly found in skimmers
+static const uint8_t SKIMMER_OUIS[][3] = {
+  {0x20, 0xC3, 0x8F}, // HC-05/06 variant
+  {0x00, 0x1A, 0x7D}, // HC-05 common OUI
+  {0x98, 0xD3, 0x31}, // cheap BT module
+  {0xE8, 0xEB, 0x1B}, // MLT-BT05
+};
+
+struct SkimmerResult {
+  String mac;
+  String name;
+  int rssi;
+  String reason;
+  uint32_t ts;
+};
+static std::vector<SkimmerResult> skimmerResults;
+static bool skimmerActive = false;
+
+// Skimmer detection runs on top of the normal BLE scan callback
+// We inspect scan results after each burst via checkSkimmers()
+static void checkSkimmers() {
+  // Access global scanResults via a new scan pass isn't ideal.
+  // Instead, we hook into the scan callback and do checking there.
+  // For simplicity: skimmer detect registers its own scan session.
+}
+
+void startSkimmerDetect() {
+  skimmerResults.clear();
+  skimmerActive = true;
+  Activity::log("scan", "BLE skimmer detector started");
+}
+
+void stopSkimmerDetect() {
+  skimmerActive = false;
+}
+
+// Called from the normal BLE scan callback — check each device
+static void checkForSkimmer(const NimBLEAdvertisedDevice* dev) {
+  if (!skimmerActive) return;
+  String mac  = String(dev->getAddress().toString().c_str());
+  String name = dev->haveName() ? String(dev->getName().c_str()) : "";
+  int rssi = dev->getRSSI();
+  String reason;
+
+  // Check name match
+  for (int i = 0; SKIMMER_NAMES[i]; i++) {
+    if (name.equalsIgnoreCase(SKIMMER_NAMES[i]) ||
+        name.startsWith(String(SKIMMER_NAMES[i]))) {
+      reason = "Name: " + name;
+      break;
+    }
+  }
+
+  // Check OUI
+  if (reason.isEmpty()) {
+    uint8_t addr[6];
+    // Parse MAC "AA:BB:CC:DD:EE:FF"
+    int v[6] = {};
+    sscanf(mac.c_str(), "%x:%x:%x:%x:%x:%x",
+      &v[0],&v[1],&v[2],&v[3],&v[4],&v[5]);
+    for (int i = 0; i < 6; i++) addr[i] = v[i];
+    for (auto& oui : SKIMMER_OUIS) {
+      if (addr[0] == oui[0] && addr[1] == oui[1] && addr[2] == oui[2]) {
+        char h[9]; snprintf(h, sizeof(h), "%02X:%02X:%02X", oui[0], oui[1], oui[2]);
+        reason = String("OUI: ") + h;
+        break;
+      }
+    }
+  }
+
+  if (reason.isEmpty()) return;
+
+  // Deduplicate
+  for (auto& r : skimmerResults) if (r.mac == mac) { r.rssi = rssi; return; }
+  skimmerResults.push_back({mac, name, rssi, reason, (uint32_t)millis()});
+  Activity::log("alert", "Skimmer candidate: " + mac + " (" + reason + ")");
+}
+
+String skimmerJson() {
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (auto& r : skimmerResults) {
+    JsonObject o = arr.add<JsonObject>();
+    o["mac"] = r.mac; o["name"] = r.name;
+    o["rssi"] = r.rssi; o["reason"] = r.reason; o["ts"] = r.ts;
+  }
+  String out; serializeJson(doc, out); return out;
+}
+
+void fillSkimmerStatus(JsonDocument& doc) {
+  doc["count"] = (int)skimmerResults.size();
+}
+
+// ---------------------------------------------------------------- GATT enumeration
+struct GattChar {
+  String uuid;
+  uint8_t props; // NimBLE property bitmask
+};
+struct GattService {
+  String uuid;
+  std::vector<GattChar> chars;
+};
+static std::vector<GattService> gattServices;
+static String   gattTargetMac;
+static bool     gattActive    = false;
+static bool     gattRunning   = false;  // true while connect/enum in progress
+static bool     gattDone      = false;
+static String   gattError;
+static TaskHandle_t gattTask  = nullptr;
+
+static void gattTaskFn(void* arg) {
+  gattServices.clear();
+  gattError = "";
+
+  NimBLEClient* client = NimBLEDevice::createClient();
+  client->setConnectionParams(12, 12, 0, 200);
+
+  NimBLEAddress addr(std::string(gattTargetMac.c_str()), BLE_ADDR_PUBLIC);
+  if (!client->connect(addr, true)) {
+    gattError = "Connection failed";
+    NimBLEDevice::deleteClient(client);
+    gattRunning = false;
+    gattDone = true;
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  Activity::log("info", "GATT connected to " + gattTargetMac);
+
+  auto services = client->getServices(true);
+  if (!services.empty()) {
+    for (auto* svc : services) {
+      GattService gs;
+      gs.uuid = String(svc->getUUID().toString().c_str());
+      auto chars = svc->getCharacteristics(true);
+      if (!chars.empty()) {
+        for (auto* ch : chars) {
+          GattChar gc;
+          gc.uuid  = String(ch->getUUID().toString().c_str());
+          gc.props = (ch->canRead()    ? 0x02 : 0) |
+                     (ch->canWriteNoResponse() ? 0x04 : 0) |
+                     (ch->canWrite()   ? 0x08 : 0) |
+                     (ch->canNotify()  ? 0x10 : 0) |
+                     (ch->canIndicate()? 0x20 : 0);
+          gs.chars.push_back(gc);
+        }
+      }
+      gattServices.push_back(gs);
+    }
+  }
+
+  client->disconnect();
+  NimBLEDevice::deleteClient(client);
+  Activity::log("info", "GATT enum done: " + String((int)gattServices.size()) + " services");
+  gattRunning = false;
+  gattDone = true;
+  vTaskDelete(nullptr);
+}
+
+void startGattEnum(const JsonDocument& params) {
+  if (gattRunning) return;
+  gattTargetMac = String((const char*)(params["mac"] | ""));
+  gattServices.clear();
+  gattDone    = false;
+  gattError   = "";
+  gattActive  = true;
+  gattRunning = true;
+  xTaskCreate(gattTaskFn, "gatt", 8192, nullptr, 1, &gattTask);
+  Activity::log("scan", "GATT enum started: " + gattTargetMac);
+}
+
+void stopGattEnum() {
+  gattActive = false;
+  // Task will finish on its own; can't safely cancel NimBLE mid-connect
+}
+
+void tickGattEnum() {} // work is in the FreeRTOS task
+
+String gattJson() {
+  JsonDocument doc;
+  doc["mac"]     = gattTargetMac;
+  doc["done"]    = gattDone;
+  doc["error"]   = gattError;
+  JsonArray svcs = doc["services"].to<JsonArray>();
+  for (auto& gs : gattServices) {
+    JsonObject so = svcs.add<JsonObject>();
+    so["uuid"] = gs.uuid;
+    JsonArray chars = so["chars"].to<JsonArray>();
+    for (auto& gc : gs.chars) {
+      JsonObject co = chars.add<JsonObject>();
+      co["uuid"]  = gc.uuid;
+      // Human-readable property flags
+      String p;
+      if (gc.props & 0x02) p += "R";
+      if (gc.props & 0x08) p += "W";
+      if (gc.props & 0x10) p += "N";
+      if (gc.props & 0x20) p += "I";
+      co["props"] = p;
+    }
+  }
+  String out; serializeJson(doc, out); return out;
+}
+
+void fillGattStatus(JsonDocument& doc) {
+  doc["done"]     = gattDone;
+  doc["running"]  = gattRunning;
+  doc["services"] = (int)gattServices.size();
+  doc["error"]    = gattError;
 }
 
 // ---------------------------------------------------------------- Clear

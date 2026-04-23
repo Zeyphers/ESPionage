@@ -50,5 +50,18 @@ namespace BleTools {
   void tickAirtagEmulation();
   void fillAirtagEmulationStatus(JsonDocument& doc);
 
+  // BLE skimmer detector — flag scan results matching known skimmer patterns
+  void startSkimmerDetect();
+  void stopSkimmerDetect();
+  String skimmerJson();
+  void fillSkimmerStatus(JsonDocument& doc);
+
+  // GATT enumerator — connect to a device and list services/characteristics
+  void startGattEnum(const JsonDocument& params); // {mac}
+  void stopGattEnum();
+  void tickGattEnum();
+  String gattJson();
+  void fillGattStatus(JsonDocument& doc);
+
   void clearLogs();
 }

@@ -242,6 +242,57 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
       </div>
       <div class="status" id="rogue-status"></div>
     </div>
+
+    <div class="feature">
+      <div class="feature-head">
+        <div><strong>&#128274; PMKID / Handshake Capture</strong><div class="desc">Capture WPA handshake or PMKID from a target AP for offline cracking.</div></div>
+        <button class="ibtn" onclick="showInfo('handshake')">i</button>
+      </div>
+      <p class="desc warn" style="margin:0 0 8px">&#9888; For authorized testing only.</p>
+      <label>Target AP
+        <select id="hs-ap-sel" style="width:100%"><option value="">-- select from scan --</option></select>
+      </label>
+      <div class="row">
+        <button class="danger" onclick="startHandshake()">Start capture</button>
+        <button class="muted" onclick="stop(event)">Stop</button>
+        <button class="muted" onclick="refreshHandshakes()">&#8635; Refresh</button>
+        <button class="ghost" onclick="exportHc22000()" title="Export hashcat 22000">&#8595; HC22000</button>
+      </div>
+      <div class="status" id="hs-status">&mdash;</div>
+      <div class="list" id="hs-list"></div>
+    </div>
+
+    <div class="feature">
+      <div class="feature-head">
+        <div><strong>&#128100; Station Scanner</strong><div class="desc">Find clients associated with a target AP.</div></div>
+        <button class="ibtn" onclick="showInfo('station')">i</button>
+      </div>
+      <label>Target AP
+        <select id="sta-ap-sel" style="width:100%"><option value="">-- select from scan --</option></select>
+      </label>
+      <div class="row">
+        <button onclick="startStationScan()">Scan clients</button>
+        <button class="muted" onclick="stop(event)">Stop</button>
+        <button class="muted" onclick="refreshStations()">&#8635; Refresh</button>
+        <button class="ghost" onclick="exportStations()" title="Export CSV">&#8595; CSV</button>
+      </div>
+      <div class="status" id="sta-status">&mdash;</div>
+      <div class="list" id="sta-list"></div>
+    </div>
+
+    <div class="feature">
+      <div class="feature-head">
+        <div><strong>&#127922; Karma Attack</strong><div class="desc">Auto-beacon every SSID seen in probe requests so nearby devices auto-connect.</div></div>
+        <button class="ibtn" onclick="showInfo('karma')">i</button>
+      </div>
+      <p class="desc warn" style="margin:0 0 8px">&#9888; For authorized testing only.</p>
+      <div class="row">
+        <button class="danger" onclick="setMode(22)">Start</button>
+        <button class="muted" onclick="stop(event)">Stop</button>
+      </div>
+      <div class="status" id="karma-status">&mdash;</div>
+      <div class="list" id="karma-list"></div>
+    </div>
   </section>
 
   <!-- BLE -->
@@ -368,6 +419,37 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
         <label style="font-size:12px">Interval (s)&nbsp;<input type="number" id="ble-jiggle-interval" value="30" min="5" max="300" style="width:56px"></label>
         <button id="ble-jiggle-btn" onclick="toggleBleJiggler()">&#128640; Start jiggler</button>
       </div>
+    </div>
+
+    <div class="feature">
+      <div class="feature-head">
+        <div><strong>&#128178; BLE Skimmer Detector</strong><div class="desc">Flag nearby BLE devices matching known card skimmer patterns.</div></div>
+        <button class="ibtn" onclick="showInfo('skimmer')">i</button>
+      </div>
+      <div class="row">
+        <button onclick="setMode(23)">Start scan</button>
+        <button class="muted" onclick="stop(event)">Stop</button>
+        <button class="muted" onclick="refreshSkimmers()">&#8635; Refresh</button>
+      </div>
+      <div class="status" id="skimmer-status">&mdash;</div>
+      <div class="list" id="skimmer-list"></div>
+    </div>
+
+    <div class="feature">
+      <div class="feature-head">
+        <div><strong>&#128270; GATT Enumerator</strong><div class="desc">Connect to a BLE device and list its services and characteristics.</div></div>
+        <button class="ibtn" onclick="showInfo('gatt')">i</button>
+      </div>
+      <label>Target device
+        <select id="gatt-dev-sel" style="width:100%"><option value="">-- select from BLE scan --</option></select>
+      </label>
+      <div class="row">
+        <button onclick="startGattEnum()">Connect &amp; enumerate</button>
+        <button class="muted" onclick="stopGattEnum()">Disconnect</button>
+        <button class="muted" onclick="refreshGatt()">&#8635; Refresh</button>
+      </div>
+      <div class="status" id="gatt-status">&mdash;</div>
+      <div id="gatt-tree" class="list"></div>
     </div>
   </section>
 
@@ -1207,6 +1289,36 @@ const INFO = {
     t: "Radio controls",
     b: "TX power: 2\u201320 dBm. Lower = shorter range (harder to detect, less interference), higher = more range. MAC Randomize: gives the AP interface a new MAC address so you're harder to fingerprint."
   },
+  handshake: {
+    t: "PMKID / WPA Handshake Capture",
+    b: "Captures the WPA2 PMKID (from the first EAPOL frame) or a full 4-way handshake. The output file is hashcat 22000 format \u2014 ready for offline dictionary or brute-force cracking.",
+    how: ["Scan WiFi first","Pick target AP","Start capture \u2014 ESP32 switches to target channel","Clients reconnecting or new associations send the needed frames","Export HC22000 to crack offline with hashcat -m 22000"],
+    note: "PMKID capture is passive (no deauth needed). Full handshake requires a client to connect or reconnect \u2014 combine with Deauth to force reconnects. Only legal on networks you own."
+  },
+  station: {
+    t: "Station Scanner",
+    b: "Monitors a target AP's channel and logs every client MAC and RSSI seen sending data to it. Useful for mapping who is connected to a network.",
+    how: ["Scan WiFi first","Pick target AP","Start \u2014 ESP32 listens on that channel","Client MACs appear as they send frames","Export CSV for offline analysis"],
+    note: "Passive: no frames sent. Misses clients that are quiet (no traffic)."
+  },
+  karma: {
+    t: "Karma Attack",
+    b: "Listens for probe requests from nearby phones (\"is my old network around?\") and immediately beacons back the exact SSID they asked for. Phones configured to auto-join known networks will connect automatically.",
+    how: ["Start \u2014 ESP32 enters promiscuous mode","Phones broadcast probe requests for SSIDs they've connected to before","ESP32 beacons those SSIDs","Devices auto-connect","Use Evil Portal to intercept their traffic"],
+    note: "Works best on older devices or networks without PMF. Modern iOS/Android probes with randomized MACs and masked SSIDs, limiting effectiveness. Only legal on networks you own."
+  },
+  skimmer: {
+    t: "BLE Skimmer Detector",
+    b: "Card skimmers (ATMs, fuel pumps) often use cheap BLE modules (HC-05, HC-06, HM-10, etc.) to exfiltrate card data. This scanner flags any nearby BLE device whose name or manufacturer OUI matches known skimmer patterns.",
+    how: ["Start BLE scan (or start skimmer detect which runs its own scan)","Nearby devices are checked against a built-in list of known skimmer module names and OUIs","Flagged devices shown here with the reason"],
+    note: "False positives are possible \u2014 HC-05/06 modules are also used in hobby electronics. A hit near an ATM or fuel pump is a stronger signal."
+  },
+  gatt: {
+    t: "GATT Enumerator",
+    b: "Connects to a BLE device and reads its GATT profile \u2014 the tree of services and characteristics that define what the device can do. Useful for reverse engineering BLE peripherals.",
+    how: ["Run a BLE scan first","Pick target device from the dropdown","Connect & Enumerate \u2014 ESP32 connects and queries all services","Service UUIDs and characteristic UUIDs + properties appear in the tree","Properties: R=Read, W=Write, WNR=WriteNoResponse, N=Notify, I=Indicate"],
+    note: "Connection drops the ESP32 from its own AP briefly on some hardware. Known standard UUIDs can be looked up at bluetooth.com/specifications/assigned-numbers."
+  },
 };
 
 // -------- Tabs --------
@@ -1291,6 +1403,11 @@ function onStatus(s) {
   if (s.mode === 11) document.getElementById('airtag-status').textContent = `Scanning \u00b7 ${s.unique||0} unique \u00b7 ${s.followers||0} followers`;
   if (s.mode === 17) document.getElementById('deauth-status').textContent = `Deauth \u00b7 ${s.sent||0} frames \u00b7 ${s.target}`;
   if (s.mode === 19) document.getElementById('airtag-emu-status').textContent = `\uD83D\uDFE5 Broadcasting as \u201c${s.name||'AirTag'}\u201d \u00b7 ${s.count||0} packets sent`;
+  if (s.mode === 20) { document.getElementById('hs-status').textContent = `Capturing \u00b7 PMKID: ${s.pmkid||0} \u00b7 handshakes: ${s.handshakes||0}`; refreshHandshakes(); }
+  if (s.mode === 21) { document.getElementById('sta-status').textContent = `Scanning \u00b7 ${s.count||0} clients found`; refreshStations(); }
+  if (s.mode === 22) { refreshKarma(); }
+  if (s.mode === 23) { document.getElementById('skimmer-status').textContent = `Scanning \u00b7 ${s.flagged||0} flagged`; refreshSkimmers(); }
+  if (s.mode === 24) { refreshGatt(); }
 
   if (s.mode === 12) updateFinderUI('fd', s);
   if (s.mode === 13) updateFinderUI('bfd', s);
@@ -1471,8 +1588,13 @@ async function populateFinderTargets() {
   }
   data.sort((a,b) => b.rssi - a.rssi);
   const opts = data.map(a => `<option value="${a.bssid}|${a.ch}">${esc(a.ssid || '(hidden)')} (${a.rssi} dBm, ch${a.ch})</option>`).join('');
+  const optsWithSsid = data.map(a => `<option value="${a.bssid}|${a.ch}|${esc(a.ssid||'')}">${esc(a.ssid || '(hidden)')} (${a.rssi} dBm, ch${a.ch})</option>`).join('');
   document.getElementById('finder-target').innerHTML = '<option value="">\u2014 pick a network \u2014</option>' + opts;
   document.getElementById('deauth-target').innerHTML = '<option value="">\u2014 pick target AP \u2014</option>' + opts;
+  const hsSel = document.getElementById('hs-ap-sel');
+  if (hsSel) hsSel.innerHTML = '<option value="">-- select from scan --</option>' + optsWithSsid;
+  const staSel = document.getElementById('sta-ap-sel');
+  if (staSel) staSel.innerHTML = '<option value="">-- select from scan --</option>' + opts;
 }
 async function populateBleFinderTargets() {
   const r = await fetch('/api/ble'); let data = await r.json();
@@ -1482,6 +1604,8 @@ async function populateBleFinderTargets() {
   data.sort((a,b) => b.rssi - a.rssi);
   const opts = data.map(d => `<option value="${d.mac}">${esc(d.name||'(unnamed)')} \u00b7 ${d.mac} (${d.rssi} dBm)</option>`).join('');
   document.getElementById('bfinder-target').innerHTML = '<option value="">\u2014 pick a device \u2014</option>' + opts;
+  const gattSel = document.getElementById('gatt-dev-sel');
+  if (gattSel) gattSel.innerHTML = '<option value="">-- select from BLE scan --</option>' + opts;
 }
 
 // -------- Scenes --------
@@ -1700,6 +1824,123 @@ async function refreshProbes(live = false) {
     el.scrollTop = scroll;
   } finally { probeRefreshBusy = false; }
 }
+// -------- Handshake / PMKID --------
+function startHandshake() {
+  const sel = document.getElementById('hs-ap-sel');
+  if (!sel.value) return alert('Scan WiFi first and pick a target AP.');
+  const [bssid, ch, ssid] = sel.value.split('|');
+  setMode(20, { bssid, channel: parseInt(ch), ssid });
+}
+async function refreshHandshakes() {
+  const r = await fetch('/api/handshakes'); const data = await r.json();
+  const el = document.getElementById('hs-list');
+  if (!data || !data.length) { el.innerHTML = emptyItem('No handshakes captured yet'); return; }
+  el.innerHTML = '';
+  data.forEach(h => {
+    const d = document.createElement('div'); d.className = 'list-item';
+    const type = h.pmkid ? 'PMKID' : h.complete ? 'Full handshake' : 'Partial';
+    d.innerHTML = `<div class="l"><div class="name">${esc(h.ssid||h.bssid)}</div><div class="meta">${type} \u00b7 client: ${h.client} \u00b7 ${fmtTime(h.ts)}</div></div>`;
+    el.appendChild(d);
+  });
+}
+async function exportHc22000() {
+  const r = await fetch('/api/handshakes/hc22000'); const text = await r.text();
+  if (!text.trim()) return alert('No handshakes to export.');
+  const a = document.createElement('a');
+  a.href = 'data:text/plain,' + encodeURIComponent(text);
+  a.download = 'espionage.hc22000'; a.click();
+}
+
+// -------- Station Scanner --------
+function startStationScan() {
+  const sel = document.getElementById('sta-ap-sel');
+  if (!sel.value) return alert('Scan WiFi first and pick a target AP.');
+  const [bssid, ch] = sel.value.split('|');
+  setMode(21, { bssid, channel: parseInt(ch) });
+}
+async function refreshStations() {
+  const r = await fetch('/api/stations'); const data = await r.json();
+  const el = document.getElementById('sta-list');
+  if (!data || !data.length) { el.innerHTML = emptyItem('No clients found yet'); return; }
+  el.innerHTML = '';
+  data.forEach(s => {
+    const d = document.createElement('div'); d.className = 'list-item';
+    d.innerHTML = `<div class="l"><div class="name">${esc(s.mac)}</div><div class="meta">${s.rssi} dBm \u00b7 pkts: ${s.count}</div></div><div class="r ${rssiClass(s.rssi)}">${s.rssi}</div>`;
+    el.appendChild(d);
+  });
+}
+async function exportStations() {
+  const r = await fetch('/api/stations'); const data = await r.json();
+  if (!data || !data.length) return alert('No station data to export.');
+  const csv = 'MAC,RSSI,Packets\n' + data.map(s => `${s.mac},${s.rssi},${s.count}`).join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv,' + encodeURIComponent(csv);
+  a.download = 'stations.csv'; a.click();
+}
+
+// -------- Karma --------
+async function refreshKarma() {
+  const r = await fetch('/api/status'); const data = await r.json();
+  const el = document.getElementById('karma-list');
+  const ssids = data.karma_ssids || [];
+  const el2 = document.getElementById('karma-status');
+  if (el2) el2.textContent = data.mode === 22
+    ? `\u25CF Active \u00b7 ${ssids.length} SSIDs learned \u00b7 ${data.beacons||0} beacons sent`
+    : '\u25CB Idle';
+  if (!ssids.length) { el.innerHTML = emptyItem('Waiting for probe requests\u2026'); return; }
+  el.innerHTML = '';
+  ssids.forEach(s => {
+    const d = document.createElement('div'); d.className = 'list-item';
+    d.innerHTML = `<div class="l"><div class="name">${esc(s)}</div></div>`;
+    el.appendChild(d);
+  });
+}
+
+// -------- BLE Skimmer Detector --------
+async function refreshSkimmers() {
+  const r = await fetch('/api/skimmers'); const data = await r.json();
+  const el = document.getElementById('skimmer-list');
+  if (!data || !data.length) { el.innerHTML = emptyItem('No skimmers detected'); return; }
+  el.innerHTML = '';
+  data.forEach(s => {
+    const d = document.createElement('div'); d.className = 'list-item';
+    d.innerHTML = `<div class="l"><div class="name">${esc(s.name||'(unnamed)')} \u26a0\ufe0f</div><div class="meta">${s.mac} \u00b7 ${esc(s.reason)} \u00b7 ${s.rssi} dBm</div></div>`;
+    el.appendChild(d);
+  });
+}
+
+// -------- GATT Enumerator --------
+function startGattEnum() {
+  const sel = document.getElementById('gatt-dev-sel');
+  if (!sel.value) return alert('Scan BLE first and pick a target device.');
+  setMode(24, { mac: sel.value });
+}
+async function stopGattEnum() { await fetch('/api/action', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'stop'}) }); }
+async function refreshGatt() {
+  const r = await fetch('/api/gatt'); const data = await r.json();
+  const el = document.getElementById('gatt-tree');
+  const st = document.getElementById('gatt-status');
+  if (data.error) { if (st) st.textContent = 'Error: ' + data.error; el.innerHTML = ''; return; }
+  const svcs = data.services || [];
+  if (st) st.textContent = data.running ? 'Enumerating\u2026' : svcs.length ? `${svcs.length} services found` : 'Idle \u2014 pick a device and connect';
+  if (!svcs.length) { el.innerHTML = emptyItem(data.running ? 'Connecting\u2026' : 'No services yet'); return; }
+  el.innerHTML = '';
+  svcs.forEach(svc => {
+    const sd = document.createElement('div'); sd.className = 'list-item';
+    const charRows = (svc.chars||[]).map(c => {
+      const props = [];
+      if (c.props & 0x02) props.push('R');
+      if (c.props & 0x08) props.push('W');
+      if (c.props & 0x04) props.push('WNR');
+      if (c.props & 0x10) props.push('N');
+      if (c.props & 0x20) props.push('I');
+      return `<div class="meta" style="padding-left:12px">\u2514 ${esc(c.uuid)} [${props.join('|')||'?'}]</div>`;
+    }).join('');
+    sd.innerHTML = `<div class="l" style="width:100%"><div class="name" style="font-size:12px">${esc(svc.uuid)}</div>${charRows}</div>`;
+    el.appendChild(sd);
+  });
+}
+
 async function refreshCreds() {
   const r = await fetch('/api/portal/creds'); const data = await r.json();
   const el = document.getElementById('portal-creds');

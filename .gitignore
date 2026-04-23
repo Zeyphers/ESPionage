@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Arduino build output
+build/
+*.elf
+*.bin
+*.map
+*.hex
+
+# VS Code local settings
+.vscode/settings.json
+.vscode/launch.json
+
+# Wokwi simulation artifacts
+wokwi.toml
+diagram.json
+esp32_puck/.DS_Store

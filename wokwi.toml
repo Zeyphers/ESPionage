@@ -1,0 +1,12 @@
+[wokwi]
+version = 1
+elf = "build/esp32_puck.ino.elf"
+firmware = "build/esp32_puck.ino.bin"
+
+[[net.forward]]
+from = "localhost:8180"
+to = "192.168.4.1:80"
+
+[[net.forward]]
+from = "localhost:8181"
+to = "192.168.4.1:81"

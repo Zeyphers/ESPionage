@@ -1,0 +1,50 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build ESPionage (S3)",
+      "type": "shell",
+      "command": "arduino-cli compile --fqbn esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=min_spiffs,PSRAM=opi,USBMode=default,UploadSpeed=921600 --build-path '${workspaceFolder}/build' '${workspaceFolder}/esp32_puck'",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Flash ESPionage (S3)",
+      "type": "shell",
+      "command": "arduino-cli upload --fqbn esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=min_spiffs,PSRAM=opi,USBMode=default,UploadSpeed=921600 --port /dev/cu.usbserial-0001 --input-dir '${workspaceFolder}/build' '${workspaceFolder}/esp32_puck'",
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build + Flash ESPionage (S3)",
+      "dependsOn": ["Build ESPionage (S3)", "Flash ESPionage (S3)"],
+      "dependsOrder": "sequence",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Build ESPionage (ESP32 classic — for Wokwi)",
+      "type": "shell",
+      "command": "arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs --build-path '${workspaceFolder}/build' '${workspaceFolder}/esp32_puck'",
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}

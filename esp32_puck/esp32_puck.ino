@@ -48,11 +48,6 @@ enum Mode {
   MODE_DEAUTH           = 17,
   MODE_SSID_MESSAGE     = 18,
   MODE_AIRTAG_EMU       = 19,
-  MODE_HANDSHAKE        = 20,
-  MODE_STATION_SCAN     = 21,
-  MODE_KARMA            = 22,
-  MODE_SKIMMER_DETECT   = 23,
-  MODE_GATT_ENUM        = 24,
 };
 Mode currentMode = MODE_IDLE;
 unsigned long lastTick = 0;
@@ -109,11 +104,6 @@ void broadcastStatus() {
     case MODE_ROGUE_AP:        WifiTools::fillRogueStatus(doc); break;
     case MODE_DEAUTH:          WifiTools::fillDeauthStatus(doc); break;
     case MODE_AIRTAG_EMU:      BleTools::fillAirtagEmulationStatus(doc); break;
-    case MODE_HANDSHAKE:       WifiTools::fillHandshakeStatus(doc); break;
-    case MODE_STATION_SCAN:    WifiTools::fillStationStatus(doc); break;
-    case MODE_KARMA:           WifiTools::fillKarmaStatus(doc); break;
-    case MODE_SKIMMER_DETECT:  BleTools::fillSkimmerStatus(doc); break;
-    case MODE_GATT_ENUM:       BleTools::fillGattStatus(doc); break;
     default: break;
   }
 
@@ -146,11 +136,6 @@ void stopCurrentMode() {
     case MODE_DEAUTH:          WifiTools::stopDeauth(); break;
     case MODE_SSID_MESSAGE:    WifiTools::stopSsidMessage(); break;
     case MODE_AIRTAG_EMU:      BleTools::stopAirtagEmulation(); break;
-    case MODE_HANDSHAKE:       WifiTools::stopHandshake(); break;
-    case MODE_STATION_SCAN:    WifiTools::stopStationScan(); break;
-    case MODE_KARMA:           WifiTools::stopKarma(); break;
-    case MODE_SKIMMER_DETECT:  BleTools::stopSkimmerDetect(); break;
-    case MODE_GATT_ENUM:       BleTools::stopGattEnum(); break;
     default: break;
   }
   currentMode = MODE_IDLE;
@@ -187,11 +172,6 @@ void setMode(Mode m, const JsonDocument& params) {
     case MODE_DEAUTH:          WifiTools::startDeauth(params); break;
     case MODE_SSID_MESSAGE:    WifiTools::startSsidMessage(params); break;
     case MODE_AIRTAG_EMU:      BleTools::startAirtagEmulation(params); break;
-    case MODE_HANDSHAKE:       WifiTools::startHandshake(params); break;
-    case MODE_STATION_SCAN:    WifiTools::startStationScan(params); break;
-    case MODE_KARMA:           WifiTools::startKarma(); break;
-    case MODE_SKIMMER_DETECT:  BleTools::startSkimmerDetect(); break;
-    case MODE_GATT_ENUM:       BleTools::startGattEnum(params); break;
     default: break;
   }
 }
@@ -294,21 +274,6 @@ void setupRoutes() {
   });
   server.on("/api/wardrive/csv", HTTP_GET, [](AsyncWebServerRequest *req) {
     req->send(200, "text/csv", WifiTools::wardriveCsv());
-  });
-  server.on("/api/handshakes", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->send(200, "application/json", WifiTools::handshakeJson());
-  });
-  server.on("/api/handshakes/hc22000", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->send(200, "text/plain", WifiTools::handshakeHc22000());
-  });
-  server.on("/api/stations", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->send(200, "application/json", WifiTools::stationScanJson());
-  });
-  server.on("/api/skimmers", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->send(200, "application/json", BleTools::skimmerJson());
-  });
-  server.on("/api/gatt", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->send(200, "application/json", BleTools::gattJson());
   });
   server.on("/api/activity", HTTP_GET, [](AsyncWebServerRequest *req) {
     req->send(200, "application/json", Activity::json());
@@ -531,9 +496,6 @@ void loop() {
     case MODE_BLE_FINDER:      BleTools::tickFinder(); break;
     case MODE_DEAUTH:          WifiTools::tickDeauth(); break;
     case MODE_AIRTAG_EMU:      BleTools::tickAirtagEmulation(); break;
-    case MODE_HANDSHAKE:       WifiTools::tickHandshake(); break;
-    case MODE_KARMA:           WifiTools::tickKarma(); break;
-    case MODE_GATT_ENUM:       BleTools::tickGattEnum(); break;
     default: break;
   }
 

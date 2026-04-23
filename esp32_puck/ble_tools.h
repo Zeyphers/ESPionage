@@ -19,6 +19,7 @@ namespace BleTools {
   void startSpam(SpamVendor v, const JsonDocument& params, int appleIdx = -1);
   void stopSpam();
   void tickSpam();
+  void updateAppleIdx(int idx);  // hot-swap device while spam is running
   void fillSpamStatus(JsonDocument& doc);
 
   // Returns JSON array of Apple device names for the UI picker

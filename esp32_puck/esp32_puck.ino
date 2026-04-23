@@ -142,6 +142,13 @@ void stopCurrentMode() {
 }
 
 void setMode(Mode m, const JsonDocument& params) {
+  // Apple spam: allow switching devices without a full mode restart.
+  // The normal early-return would block the new appleIdx from being applied
+  // because the mode number (4) hasn't changed.
+  if (m == currentMode && m == MODE_APPLE_SPAM) {
+    BleTools::updateAppleIdx(params["appleIdx"] | -1);
+    return;
+  }
   if (m == currentMode) return;
   stopCurrentMode();
   currentMode = m;

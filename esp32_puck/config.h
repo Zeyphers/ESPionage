@@ -9,7 +9,7 @@
 // Max items cached in various scanners before we drop old entries
 #define MAX_WIFI_RESULTS 64
 #define MAX_BLE_RESULTS 64
-#define MAX_PROBE_RESULTS 128
+#define MAX_PROBE_RESULTS 1024
 #define MAX_WARDRIVE_ENTRIES 256
 #define MAX_PORTAL_CREDS 32
 #define MAX_ACTIVITY_LOG 64

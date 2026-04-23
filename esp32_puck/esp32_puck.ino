@@ -367,18 +367,9 @@ void setupRoutes() {
       int  interval       = doc["interval"] | 30;
       bool looping        = doc["loop"]     | false;
 
-      // Only hid / mouse / stop are actually wired up. Everything else gets a
-      // clear not-implemented note so the UI doesn't show a fake success.
-      bool supported = (!strcmp(type, "hid") || !strcmp(type, "mouse") || !strcmp(type, "stop"));
-      if (supported) {
-        UsbTools::handleAction(type, payload, interval, looping, os, vid, pid);
-        Activity::log("info", String("USB ") + type + " (" + os + ")");
-        req->send(200, "application/json", "{\"ok\":true}");
-      } else {
-        String note = String("Not yet implemented: ") + type;
-        Activity::log("warn", String("USB ") + type + " requested but not implemented");
-        req->send(200, "application/json", String("{\"ok\":false,\"note\":\"") + note + "\"}");
-      }
+      UsbTools::handleAction(type, payload, interval, looping, os, vid, pid);
+      Activity::log("info", String("USB ") + type + " (" + os + ")");
+      req->send(200, "application/json", "{\"ok\":true}");
 #else
       req->send(200, "application/json", "{\"ok\":false,\"note\":\"Requires ESP32-S3\"}");
 #endif

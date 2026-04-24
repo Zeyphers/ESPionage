@@ -437,6 +437,68 @@ void setupRoutes() {
       req->send_P(200, "text/html", PORTAL_SUCCESS);
     });
 
+  // Storage: list files on RAM disk
+  server.on("/api/storage/ls", HTTP_GET, [](AsyncWebServerRequest *req) {
+#if defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE == 0
+    req->send(200, "application/json", UsbTools::listFilesJson());
+#else
+    req->send(200, "application/json", "[]");
+#endif
+  });
+
+  // Storage: upload a file to the RAM disk
+  server.on("/api/storage/upload", HTTP_POST,
+    [](AsyncWebServerRequest *req) {
+      req->send(200, "application/json", "{\"ok\":true}");
+    },
+    [](AsyncWebServerRequest *req, String filename, size_t index, uint8_t *data, size_t len, bool final) {
+#if defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE == 0
+      bool ok = UsbTools::uploadChunk(filename.c_str(), data, len, index, final);
+      if (!ok) req->send(507, "application/json", "{\"ok\":false,\"error\":\"disk full or not mounted\"}");
+#endif
+    });
+
+  // Storage: download a file from the RAM disk
+  server.on("/api/storage/download", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (!req->hasParam("name")) { req->send(400, "text/plain", "missing name"); return; }
+    String name = req->getParam("name")->value();
+#if defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE == 0
+    size_t sz = 0;
+    uint8_t* buf = UsbTools::getFileData(name.c_str(), sz);
+    if (!buf) { req->send(404, "text/plain", "not found"); return; }
+    // Stream from heap buffer; lambda captures ownership and frees on completion
+    uint8_t* captured = buf;
+    size_t   capturedSz = sz;
+    AsyncWebServerResponse* resp = req->beginResponse(
+      "application/octet-stream", (size_t)capturedSz,
+      [captured, capturedSz](uint8_t* dst, size_t maxLen, size_t index) -> size_t {
+        size_t chunk = capturedSz - index;
+        if (chunk > maxLen) chunk = maxLen;
+        memcpy(dst, captured + index, chunk);
+        if (index + chunk >= capturedSz) free(captured);
+        return chunk;
+      });
+    resp->addHeader("Content-Disposition", "attachment; filename=\"" + name + "\"");
+    req->send(resp);
+#else
+    req->send(404, "text/plain", "not available");
+#endif
+  });
+
+  // Storage: delete a file from the RAM disk
+  server.on("/api/storage/delete", HTTP_POST,
+    [](AsyncWebServerRequest *req){},
+    NULL,
+    [](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index, size_t total) {
+#if defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE == 0
+      JsonDocument doc;
+      if (deserializeJson(doc, data, len)) { req->send(400, "text/plain", "bad json"); return; }
+      const char* name = doc["name"] | "";
+      bool ok = UsbTools::deleteFile(name);
+      req->send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"not found\"}");
+#endif
+    });
+
   server.onNotFound([](AsyncWebServerRequest *req) {
     if (EvilPortal::isActive()) req->redirect("/portal-login");
     else req->redirect("/");
@@ -498,6 +560,10 @@ void loop() {
     case MODE_AIRTAG_EMU:      BleTools::tickAirtagEmulation(); break;
     default: break;
   }
+
+#if defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE == 0
+  UsbTools::tick();
+#endif
 
   if (millis() - lastTick > 500) {
     lastTick = millis();

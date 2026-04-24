@@ -582,6 +582,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
             <div class="sc-ico">&#128260;</div><div class="sc-name">Invert display</div>
             <div class="sc-desc">Inverts all screen colors instantly. Reversible.</div>
           </button>
+          <button class="scene" data-platforms="windows,mac" onclick="loadDucky('starwars')">
+            <div class="sc-ico">&#11088;</div><div class="sc-name">Star Wars</div>
+            <div class="sc-desc">Plays the ASCII Star Wars movie in the terminal via telnet.</div>
+          </button>
         </div>
 
         <div class="ducky-step">2. Payload <span class="ducky-step-hint">(Ducky syntax; plain lines auto-type as text)</span></div>
@@ -626,13 +630,30 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 
       <div class="feature" id="usb-storage-card">
         <div class="feature-head">
-          <div><strong>&#128190; USB Mass Storage</strong><div class="desc">Appear as a 512 KB USB flash drive backed by PSRAM. Target PC sees a drive labelled "ESPIONAGE".</div></div>
+          <div><strong>&#128190; USB File Manager</strong><div class="desc">512 KB PSRAM drive. Mount to PC via USB, then upload/download files from any device on the network.</div></div>
           <button class="ibtn" onclick="showInfo('usbstorage')">i</button>
         </div>
         <div class="status" id="usb-storage-status">&mdash;</div>
         <div class="row" style="margin-top:6px">
-          <button class="danger" onclick="usbAction('storage')">&#9654; Mount as drive</button>
+          <button class="danger" id="usb-storage-mount-btn" onclick="usbAction('storage')">&#9654; Mount as USB drive</button>
           <button class="muted" onclick="usbStop()">&#9632; Unmount</button>
+        </div>
+
+        <div id="usb-storage-manager" style="margin-top:14px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+            <strong style="font-size:13px">&#128193; Files on drive</strong>
+            <button class="ghost" onclick="storageRefresh()" style="font-size:11px;padding:3px 10px">&#8635; Refresh</button>
+          </div>
+          <div id="usb-filelist-wrap" style="border:1px solid var(--border);border-radius:6px;overflow:hidden;min-height:36px">
+            <div id="usb-storage-filelist" style="font-size:12px;color:var(--muted);padding:10px;text-align:center">Loading&hellip;</div>
+          </div>
+
+          <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+            <label style="font-size:13px;font-weight:600;display:block;margin-bottom:8px">&#8593; Upload to drive</label>
+            <input type="file" id="usb-upload-input" multiple style="font-size:12px;width:100%;margin-bottom:8px">
+            <button class="danger" onclick="storageUpload()" style="width:100%">&#8593; Upload selected files</button>
+            <div id="usb-upload-status" style="font-size:12px;margin-top:6px;min-height:16px"></div>
+          </div>
         </div>
       </div>
 
@@ -1221,7 +1242,7 @@ document.querySelectorAll('nav button').forEach(btn => {
     if (btn.dataset.tab === 'home') refreshActivity();
     if (btn.dataset.tab === 'portal') refreshCreds();
     if (btn.dataset.tab === 'system') loadInfo();
-    if (btn.dataset.tab === 'usb') checkUsb();
+    if (btn.dataset.tab === 'usb') { checkUsb(); storageRefresh(); }
   });
 });
 
@@ -1886,9 +1907,72 @@ async function refreshUsbStatus() {
     // Update storage status
     const ms = document.getElementById('usb-storage-status');
     if (ms) ms.textContent = d.mscActive ? '\uD83D\uDFE2 RAM disk mounted \u2014 512 KB visible to host' : '\u25CF Not mounted';
+    // Refresh file list when USB tab is active
+    if (document.querySelector('nav button.active')?.dataset.tab === 'usb') storageRefresh();
   } catch(e) {}
 }
 // USB status is now updated via pollState() — no separate interval
+
+// ── Storage file manager ─────────────────────────────────────────────────────
+async function storageRefresh() {
+  const el = document.getElementById('usb-storage-filelist');
+  if (!el) return;
+  try {
+    const files = await fetch('/api/storage/ls').then(r => r.json());
+    if (!files.length) {
+      el.innerHTML = '<div style="padding:10px;text-align:center;color:var(--muted)">Drive is empty</div>';
+      return;
+    }
+    el.innerHTML = files.map(f => `
+      <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--border)">
+        <span style="flex:1;font-size:13px;word-break:break-all">${f.name}</span>
+        <span style="font-size:11px;color:var(--muted);white-space:nowrap">${f.size < 1024 ? f.size+'B' : (f.size/1024).toFixed(1)+'KB'}</span>
+        <a href="/api/storage/download?name=${encodeURIComponent(f.name)}" download="${f.name}"
+           style="font-size:11px;padding:3px 8px;background:var(--ok);color:#000;border-radius:4px;text-decoration:none;white-space:nowrap">&#8595; Get</a>
+        <button onclick="storageDelete('${f.name}')"
+           style="font-size:11px;padding:3px 8px;background:var(--danger);color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap">&#128465;</button>
+      </div>`).join('');
+  } catch(e) {
+    el.innerHTML = '<div style="padding:10px;text-align:center;color:var(--danger)">Failed to load</div>';
+  }
+}
+
+async function storageDelete(name) {
+  if (!confirm('Delete ' + name + '?')) return;
+  try {
+    const d = await fetch('/api/storage/delete', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({name})
+    }).then(r => r.json());
+    if (d.ok) storageRefresh();
+    else alert('Delete failed: ' + (d.error || 'unknown'));
+  } catch(e) { alert('Delete failed'); }
+}
+
+async function storageUpload() {
+  const input  = document.getElementById('usb-upload-input');
+  const status = document.getElementById('usb-upload-status');
+  if (!input || !input.files.length) { if (status) status.textContent = 'Select a file first'; return; }
+  const files = Array.from(input.files);
+  const tooBig = files.find(f => f.size > 460 * 1024);
+  if (tooBig) { if (status) status.textContent = '\u274C ' + tooBig.name + ' is too large (max 460\u00a0KB)'; return; }
+  if (status) status.textContent = '';
+  let done = 0;
+  for (const file of files) {
+    if (status) status.textContent = `Uploading ${file.name}\u2026 (${done+1}/${files.length})`;
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const d = await fetch('/api/storage/upload', { method: 'POST', body: fd }).then(r => r.json());
+      if (!d.ok) { if (status) status.textContent = '\u274C ' + file.name + ': ' + (d.error || 'failed'); return; }
+      done++;
+    } catch(e) { if (status) status.textContent = '\u274C Upload failed'; return; }
+  }
+  if (status) status.textContent = `\u2705 ${done} file${done>1?'s':''} uploaded \u2014 PC drive will refresh in a moment`;
+  input.value = '';
+  storageRefresh();
+}
 
 // ── BLE HID ─────────────────────────────────────────────────────────────────
 let bleHidJiggling = false;
@@ -2044,6 +2128,8 @@ async function pollState() {
     if (ss && ud.vid) ss.textContent = `Active: ${ud.product || 'HID Device'} (${ud.vid}:${ud.pid})`;
     const ms = document.getElementById('usb-storage-status');
     if (ms) ms.textContent = ud.mscActive ? '\uD83D\uDFE2 RAM disk mounted \u2014 512 KB visible to host' : '\u25CF Not mounted';
+    const sf = document.getElementById('usb-storage-files');
+    if (sf) { sf.style.display = ud.mscActive ? 'block' : 'none'; if (ud.mscActive) storageRefresh(); }
 
     updateConflictBanner();
   } catch(e) {}
@@ -2260,14 +2346,17 @@ ENTER`
 DELAY 500
 GUI r
 DELAY 400
-STRING https://www.youtube.com/watch?v=2qBlE2-WL60
+STRING https://www.youtube.com/watch?v=dQw4w9WgXcQ
 ENTER`,
     mac:
-`REM Rickroll via Spotlight
+`REM Rickroll via Terminal open command
 DELAY 500
 GUI SPACE
-DELAY 500
-STRING https://www.youtube.com/watch?v=2qBlE2-WL60
+DELAY 600
+STRING Terminal
+ENTER
+DELAY 1500
+STRING open https://www.youtube.com/watch?v=dQw4w9WgXcQ
 ENTER`
   },
   lock_screen: {
@@ -2506,8 +2595,31 @@ ENTER`
 `REM Invert display colors (accessibility shortcut, all Windows versions)
 CTRL ALT DOWN`,
     mac:
-`REM Invert all display colors — instant, reversible, works on any Mac
-CTRL OPTION CMD 8`
+`REM Invert all display colors — instant, reversible. Run again to undo.
+CTRL ALT GUI 8`
+  },
+
+  starwars: {
+    windows:
+`REM Play Star Wars ASCII movie in cmd
+DELAY 800
+GUI r
+DELAY 500
+STRING cmd
+ENTER
+DELAY 600
+STRING telnet towel.blinkenlights.nl
+ENTER`,
+    mac:
+`REM Play Star Wars ASCII movie in Terminal
+DELAY 800
+GUI SPACE
+DELAY 600
+STRING Terminal
+ENTER
+DELAY 1500
+STRING telnet towel.blinkenlights.nl
+ENTER`
   },
 };
 

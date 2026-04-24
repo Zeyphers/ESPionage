@@ -24,6 +24,11 @@ namespace UsbTools {
   bool isMounted();           // true when USB host has enumerated us
   bool isActive();            // true when jiggler or HID script is running
   String getStatusJson();     // {"mounted":true,"jiggling":false,"hidRunning":false}
+  bool     uploadChunk(const char* filename, const uint8_t* data, size_t len, size_t index, bool final);
+  String   listFilesJson();
+  uint8_t* getFileData(const char* filename, size_t& outSize); // caller must free()
+  bool     deleteFile(const char* filename);
+  void     tick();            // call from loop() — handles deferred media-change signal
 }
 
 #endif // ARDUINO_USB_MODE == 0

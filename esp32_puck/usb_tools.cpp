@@ -42,7 +42,7 @@ static void formatRamDisk() {
   bs[13]=0x08;                                // sectors/cluster = 8 (4 KB clusters)
   bs[14]=0x01; bs[15]=0x00;                   // reserved sectors = 1
   bs[16]=0x02;                                // FAT copies = 2
-  bs[17]=0x00; bs[18]=0x02;                   // root entries = 512
+  bs[17]=0x00; bs[18]=0x01;                   // root entries = 256 (16 sectors = matches data area at sector 19)
   bs[19]=0x00; bs[20]=0x04;                   // total sectors = 1024
   bs[21]=0xF8;                                // media type fixed disk
   bs[22]=0x01; bs[23]=0x00;                   // sectors/FAT = 1
@@ -94,6 +94,229 @@ static void formatRamDisk() {
   // Mark cluster 2 as EOC in both FATs (FAT12 encoding)
   fat[3]=0xFF; fat[4]=0x0F;
   fat2[3]=0xFF; fat2[4]=0x0F;
+}
+
+// --------------------------------------------------------------------------
+// FAT12 helpers
+// --------------------------------------------------------------------------
+// Geometry: 1 reserved + 2 FAT sectors + 16 root-dir sectors = sector 19 = first data sector
+#define MSC_FIRST_DATA_SECTOR 19
+#define MSC_SECTORS_PER_CLUSTER 8
+#define MSC_CLUSTER_SIZE  (MSC_SECTOR_SIZE * MSC_SECTORS_PER_CLUSTER)
+#define MSC_ROOT_ENTRIES  256
+#define MSC_ROOT_SECTOR   3
+#define MSC_MAX_CLUSTER   127  // clusters 2..126 → 125 usable clusters
+
+static uint16_t getFat12(uint16_t cluster) {
+  uint8_t* fat = _mscDisk + MSC_SECTOR_SIZE;
+  uint32_t off = cluster + (cluster >> 1);
+  uint16_t val = (uint16_t)fat[off] | ((uint16_t)fat[off+1] << 8);
+  return (cluster & 1) ? (val >> 4) : (val & 0x0FFF);
+}
+
+static void setFat12(uint16_t cluster, uint16_t value) {
+  uint32_t off = cluster + (cluster >> 1);
+  for (int f = 1; f <= 2; f++) {
+    uint8_t* fat = _mscDisk + f * MSC_SECTOR_SIZE;
+    if (cluster & 1) {
+      fat[off]   = (fat[off] & 0x0F) | (uint8_t)((value & 0x0F) << 4);
+      fat[off+1] = (uint8_t)((value >> 4) & 0xFF);
+    } else {
+      fat[off]   = (uint8_t)(value & 0xFF);
+      fat[off+1] = (fat[off+1] & 0xF0) | (uint8_t)((value >> 8) & 0x0F);
+    }
+  }
+}
+
+static uint16_t findFreeCluster(uint16_t start = 3) {
+  for (uint16_t c = start; c < MSC_MAX_CLUSTER; c++)
+    if (getFat12(c) == 0x000) return c;
+  return 0;
+}
+
+static uint8_t* clusterPtr(uint16_t cluster) {
+  uint32_t sector = MSC_FIRST_DATA_SECTOR + (uint32_t)(cluster - 2) * MSC_SECTORS_PER_CLUSTER;
+  return _mscDisk + sector * MSC_SECTOR_SIZE;
+}
+
+static uint8_t* findFreeDirEntry() {
+  uint8_t* root = _mscDisk + MSC_ROOT_SECTOR * MSC_SECTOR_SIZE;
+  for (int i = 0; i < MSC_ROOT_ENTRIES; i++) {
+    uint8_t* e = root + i * 32;
+    if (e[0] == 0x00 || e[0] == 0xE5) return e;
+  }
+  return nullptr;
+}
+
+static uint8_t* findDirEntry(const char name83[11]) {
+  uint8_t* root = _mscDisk + MSC_ROOT_SECTOR * MSC_SECTOR_SIZE;
+  for (int i = 0; i < MSC_ROOT_ENTRIES; i++) {
+    uint8_t* e = root + i * 32;
+    if (e[0] == 0x00) break;
+    if (e[0] == 0xE5 || (e[11] & 0x18)) continue;
+    if (memcmp(e, name83, 11) == 0) return e;
+  }
+  return nullptr;
+}
+
+static void toFat83(const char* filename, char out[11]) {
+  memset(out, ' ', 11);
+  const char* dot = strrchr(filename, '.');
+  int nameLen = dot ? (int)(dot - filename) : (int)strlen(filename);
+  if (nameLen > 8) nameLen = 8;
+  for (int i = 0; i < nameLen; i++) {
+    char c = (char)toupper((unsigned char)filename[i]);
+    if (strchr("\"*/:;<=>?[\\]|+,. ", c)) c = '_';
+    out[i] = c;
+  }
+  if (dot && dot[1]) {
+    int extLen = (int)strlen(dot + 1);
+    if (extLen > 3) extLen = 3;
+    for (int i = 0; i < extLen; i++) {
+      char c = (char)toupper((unsigned char)dot[1+i]);
+      if (strchr("\"*/:;<=>?[\\]|+,. ", c)) c = '_';
+      out[8+i] = c;
+    }
+  }
+}
+
+// Deferred media-change flag — set from web task, applied from main loop via tick()
+static volatile bool _pendingMediaChange = false;
+
+// Upload state machine — one concurrent upload at a time
+static struct {
+  char     name83[11];
+  uint16_t firstCluster;
+  uint16_t curCluster;
+  uint32_t curOffset;
+  uint32_t totalLen;
+  bool     active;
+} _up;
+
+bool UsbTools::uploadChunk(const char* filename, const uint8_t* data, size_t len, size_t index, bool final) {
+  if (!_mscDisk || !_mscMounted) return false;
+
+  if (index == 0) {
+    toFat83(filename, _up.name83);
+    // Remove existing file with same name
+    uint8_t* ex = findDirEntry(_up.name83);
+    if (ex) {
+      uint16_t c = (uint16_t)ex[26] | ((uint16_t)ex[27] << 8);
+      while (c >= 2 && c < 0xFF8) { uint16_t nx = getFat12(c); setFat12(c, 0); c = nx; }
+      ex[0] = 0xE5;
+    }
+    uint16_t fc = findFreeCluster(3);
+    if (!fc) return false;
+    setFat12(fc, 0xFFF);
+    _up.firstCluster = fc;
+    _up.curCluster   = fc;
+    _up.curOffset    = 0;
+    _up.totalLen     = 0;
+    _up.active       = true;
+  }
+
+  if (!_up.active) return false;
+
+  size_t written = 0;
+  while (written < len) {
+    uint32_t space = MSC_CLUSTER_SIZE - _up.curOffset;
+    size_t   chunk = (len - written) < (size_t)space ? (len - written) : (size_t)space;
+    memcpy(clusterPtr(_up.curCluster) + _up.curOffset, data + written, chunk);
+    _up.curOffset += chunk;
+    written       += chunk;
+    _up.totalLen  += chunk;
+
+    if (_up.curOffset >= MSC_CLUSTER_SIZE && written < len) {
+      uint16_t nx = findFreeCluster(_up.curCluster + 1);
+      if (!nx) { _up.active = false; return false; }
+      setFat12(_up.curCluster, nx);
+      setFat12(nx, 0xFFF);
+      _up.curCluster = nx;
+      _up.curOffset  = 0;
+    }
+  }
+
+  if (final) {
+    uint8_t* e = findFreeDirEntry();
+    if (!e) { _up.active = false; return false; }
+    memset(e, 0, 32);
+    memcpy(e, _up.name83, 11);
+    e[11] = 0x20;
+    e[26] = _up.firstCluster & 0xFF;
+    e[27] = (_up.firstCluster >> 8) & 0xFF;
+    e[28] = _up.totalLen & 0xFF;
+    e[29] = (_up.totalLen >> 8) & 0xFF;
+    e[30] = (_up.totalLen >> 16) & 0xFF;
+    e[31] = (_up.totalLen >> 24) & 0xFF;
+    _up.active = false;
+    _pendingMediaChange = true;
+  }
+  return true;
+}
+
+void UsbTools::tick() {
+  if (!_pendingMediaChange || !_mscMounted) return;
+  _pendingMediaChange = false;
+  MSC.mediaPresent(false);
+  delay(400);
+  MSC.mediaPresent(true);
+}
+
+uint8_t* UsbTools::getFileData(const char* filename, size_t& outSize) {
+  if (!_mscDisk) { outSize = 0; return nullptr; }
+  char name83[11];
+  toFat83(filename, name83);
+  uint8_t* e = findDirEntry(name83);
+  if (!e) { outSize = 0; return nullptr; }
+  outSize = (uint32_t)e[28] | ((uint32_t)e[29]<<8) | ((uint32_t)e[30]<<16) | ((uint32_t)e[31]<<24);
+  if (!outSize) return (uint8_t*)malloc(1); // zero-length file
+  uint8_t* buf = (uint8_t*)malloc(outSize);
+  if (!buf) { outSize = 0; return nullptr; }
+  uint16_t cluster = (uint16_t)e[26] | ((uint16_t)e[27] << 8);
+  size_t remaining = outSize;
+  size_t offset = 0;
+  while (cluster >= 2 && cluster < 0xFF8 && remaining > 0) {
+    size_t chunk = remaining < (size_t)MSC_CLUSTER_SIZE ? remaining : (size_t)MSC_CLUSTER_SIZE;
+    memcpy(buf + offset, clusterPtr(cluster), chunk);
+    offset    += chunk;
+    remaining -= chunk;
+    cluster    = getFat12(cluster);
+  }
+  return buf;
+}
+
+bool UsbTools::deleteFile(const char* filename) {
+  if (!_mscDisk) return false;
+  char name83[11];
+  toFat83(filename, name83);
+  uint8_t* e = findDirEntry(name83);
+  if (!e) return false;
+  uint16_t c = (uint16_t)e[26] | ((uint16_t)e[27] << 8);
+  while (c >= 2 && c < 0xFF8) { uint16_t nx = getFat12(c); setFat12(c, 0); c = nx; }
+  e[0] = 0xE5;
+  _pendingMediaChange = true;
+  return true;
+}
+
+String UsbTools::listFilesJson() {
+  if (!_mscDisk) return "[]";
+  String out = "[";
+  bool first = true;
+  uint8_t* root = _mscDisk + MSC_ROOT_SECTOR * MSC_SECTOR_SIZE;
+  for (int i = 0; i < MSC_ROOT_ENTRIES; i++) {
+    uint8_t* e = root + i * 32;
+    if (e[0] == 0x00) break;
+    if (e[0] == 0xE5 || (e[11] & 0x18)) continue;
+    char name[13]; int ni = 0;
+    for (int j = 0; j < 8 && e[j] != ' '; j++) name[ni++] = e[j];
+    if (e[8] != ' ') { name[ni++] = '.'; for (int j = 8; j < 11 && e[j] != ' '; j++) name[ni++] = e[j]; }
+    name[ni] = '\0';
+    uint32_t sz = (uint32_t)e[28] | ((uint32_t)e[29]<<8) | ((uint32_t)e[30]<<16) | ((uint32_t)e[31]<<24);
+    if (!first) out += ',';
+    out += "{\"name\":\"" + String(name) + "\",\"size\":" + String(sz) + "}";
+    first = false;
+  }
+  return out + "]";
 }
 
 static int32_t mscRead(uint32_t lba, uint32_t offset, void* buf, uint32_t sz) {
@@ -386,33 +609,31 @@ void UsbTools::begin() {
   Keyboard.begin();
   Mouse.begin();
 
-  // Check if mass storage was requested (persisted in NVS)
+  // Always allocate the RAM disk so the web file manager works regardless of USB MSC state
+  _mscDisk = (uint8_t*)heap_caps_malloc(
+    MSC_SECTOR_SIZE * MSC_SECTOR_COUNT, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!_mscDisk)
+    _mscDisk = (uint8_t*)malloc(MSC_SECTOR_SIZE * 256);
+  if (_mscDisk) {
+    formatRamDisk();
+    Serial.printf("[USB MSC] RAM disk allocated: %u KB\n", MSC_SECTOR_COUNT / 2);
+  }
+
+  // Register MSC with USB only if explicitly requested (persisted in NVS)
   {
     Preferences prefs;
     prefs.begin("usb_spoof", true);
     bool msc = prefs.getBool("msc", false);
     prefs.end();
-    if (msc) {
-      // Allocate RAM disk in PSRAM
-      _mscDisk = (uint8_t*)heap_caps_malloc(
-        MSC_SECTOR_SIZE * MSC_SECTOR_COUNT, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-      if (!_mscDisk) {
-        // Fall back to internal RAM (smaller — 128KB)
-        _mscDisk = (uint8_t*)malloc(MSC_SECTOR_SIZE * 256);
-      }
-      if (_mscDisk) {
-        formatRamDisk();
-        MSC.vendorID("ESPIO");
-        MSC.productID("RamDisk");
-        MSC.productRevision("1.0");
-        MSC.onRead(mscRead);
-        MSC.onWrite(mscWrite);
-        MSC.mediaPresent(true);
-        MSC.begin(_mscDisk ? MSC_SECTOR_COUNT : 256, MSC_SECTOR_SIZE);
-        _mscMounted = true;
-        Serial.printf("[USB MSC] RAM disk allocated: %u KB\n",
-          (_mscDisk ? MSC_SECTOR_COUNT : 256) / 2);
-      }
+    if (msc && _mscDisk) {
+      MSC.vendorID("ESPIO");
+      MSC.productID("RamDisk");
+      MSC.productRevision("1.0");
+      MSC.onRead(mscRead);
+      MSC.onWrite(mscWrite);
+      MSC.mediaPresent(true);
+      MSC.begin(MSC_SECTOR_COUNT, MSC_SECTOR_SIZE);
+      _mscMounted = true;
     }
   }
 

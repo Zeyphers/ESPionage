@@ -1274,7 +1274,11 @@ function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
   ws.onopen = () => document.getElementById('conn').classList.add('ok');
   ws.onclose = () => { document.getElementById('conn').classList.remove('ok'); setTimeout(connect, 2000); };
-  ws.onmessage = e => onStatus(JSON.parse(e.data));
+  ws.onmessage = e => {
+    const d = JSON.parse(e.data);
+    if (d.gpsRequest) requestFreshGps();
+    onStatus(d);
+  };
 }
 connect();
 
@@ -1583,6 +1587,17 @@ function stopGps() {
   document.getElementById('gps-btn').textContent = 'Enable';
   document.getElementById('gps-panel').classList.remove('live');
 }
+function requestFreshGps() {
+  if (!navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition(pos => {
+    const c = pos.coords;
+    const fix = { lat: c.latitude, lon: c.longitude, acc: c.accuracy,
+                  alt: c.altitude||0, spd: c.speed||0, hdg: c.heading||0 };
+    fetch('/api/gps', { method:'POST', headers:{'Content-Type':'application/json'},
+                        body: JSON.stringify(fix) }).catch(()=>{});
+  }, ()=>{}, { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 });
+}
+
 function onGps(pos) {
   const c = pos.coords;
   lastGps = { lat: c.latitude, lon: c.longitude, acc: c.accuracy, alt: c.altitude, spd: c.speed, hdg: c.heading, ts: Date.now() };

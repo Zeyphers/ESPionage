@@ -65,4 +65,7 @@ namespace WifiTools {
 
   // Push latest phone-GPS fix so wardrive can stamp entries
   void setGps(double lat, double lon, float acc);
+
+  // Returns true (and clears the flag) if wardrive logged a new AP since last GPS update
+  bool takeGpsRequest();
 }

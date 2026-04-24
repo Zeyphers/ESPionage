@@ -131,10 +131,18 @@ static int currentTxDbm = 20;
 
 // -------- GPS (pushed from browser via setGps) --------
 static double gpsLat = 0, gpsLon = 0;
+static volatile bool _gpsNeeded = false;
 static float  gpsAcc = 0;
 static bool   gpsValid = false;
+bool takeGpsRequest() {
+  if (!_gpsNeeded) return false;
+  _gpsNeeded = false;
+  return true;
+}
+
 void setGps(double lat, double lon, float acc) {
   gpsLat = lat; gpsLon = lon; gpsAcc = acc; gpsValid = true;
+  _gpsNeeded = false; // fresh GPS received, no longer needed
 }
 
 // ---------------------------------------------------------------- init
@@ -373,6 +381,7 @@ void tickWardrive() {
         gpsValid ? gpsLon : 0.0,
         gpsValid ? gpsAcc : 0.0f
       });
+      _gpsNeeded = true; // request fresh GPS for next AP
     }
     WiFi.scanDelete();
     WiFi.scanNetworks(true, true);

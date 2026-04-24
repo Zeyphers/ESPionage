@@ -107,6 +107,8 @@ void broadcastStatus() {
     default: break;
   }
 
+  if (WifiTools::takeGpsRequest()) doc["gpsRequest"] = true;
+
   String out;
   serializeJson(doc, out);
   ws.textAll(out);
@@ -277,6 +279,12 @@ void setupRoutes() {
   });
   server.on("/api/activity", HTTP_GET, [](AsyncWebServerRequest *req) {
     req->send(200, "application/json", Activity::json());
+  });
+
+  // GPS needed poll — for iOS Shortcut to check whether to send fresh GPS
+  server.on("/api/gps/needed", HTTP_GET, [](AsyncWebServerRequest *req) {
+    bool needed = WifiTools::takeGpsRequest();
+    req->send(200, "application/json", needed ? "{\"needed\":true}" : "{\"needed\":false}");
   });
 
   server.on("/api/logs/clear", HTTP_POST, [](AsyncWebServerRequest *req) {
